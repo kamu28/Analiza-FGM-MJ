@@ -1,0 +1,586 @@
+---
+title: "Wykorzystanie statystyk meczowych Michael`a Jordana do oszacowania średnich zdobyczy punktowych"
+author: "Kamil Chmielak"
+date: today
+format:
+  html:
+   self-contained: true
+   message: false 
+   warning: false
+   echo: false
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(rvest)
+library(tidyverse)
+library(tidyr)
+library(readODS)
+library(knitr)
+library(kableExtra)
+library(formattable)
+library(gtsummary)
+library(ggplot2)
+library(cowplot)
+library(PerformanceAnalytics)
+library(lmtest)
+library(car)
+library(stats)
+library(performance)
+library(see)
+library(patchwork)
+library(gridExtra)
+library(grid)
+library(psych)
+options(scipen = 999)
+```
+
+## Cel projektu
+
+Głównym celem analizy jest zbadanie wpływu innych statystyk na zdobywanie punktów przez Michaela Jordana w 9 sezonach zasadniczych NBA oraz utworzenie modelu predykcyjnego wyjaśniającego ilość zdobywanych punktów w meczu.
+
+## Zbiór danych
+
+Do utworzenia zbioru danych oraz analizy wykorzystane zostały statystyki z poszczególnych 9 sezonów NBA, które zostały połączone w pojedynczą, główną ramkę danych. Statystyki pochodzą ze strony `www.basketball-reference.com`, która przechowuje statystyki, wyniki oraz historię lig NBA, ABA, WNBA, a także topowych eurpoejskich rywalizacji.
+
+```{r}
+##Tabelki
+RS84 <- read_ods("DF/Jordan1984.ods")
+RS85 <- read_ods("DF/Jordan1985.ods")
+RS86 <- read_ods("DF/Jordan1986.ods")
+RS87 <- read_ods("DF/Jordan1987.ods")
+RS88 <- read_ods("DF/Jordan1988.ods")
+RS89 <- read_ods("DF/Jordan1989.ods")
+RS90 <- read_ods("DF/Jordan1990.ods")
+RS91 <- read_ods("DF/Jordan1991.ods")
+RS92 <- read_ods("DF/Jordan1992.ods")
+```
+
+```{r}
+##Tworzenie głównej tabeli tabeli z podziałem na mecze wyjazdowe i domowe oraz przekształcenia
+RS <- rbind(RS84,RS85,RS86,RS87,RS88,RS89,RS90,RS91,RS92)
+RS$WL <- substr(RS$WL,1,1)
+RS$MP <- as.numeric(substr(RS$MP,start=1,stop=2))
+RS <- subset(RS,select = -GS)
+colnames(RS)[colnames(RS) == "X3PA"] <- "P3A"
+colnames(RS)[colnames(RS) == "X3P"] <- "P3"
+
+RS <- RS %>% mutate("P2A"=FGA-P3A)
+RS <- RS %>% select(1:5,"PTS",6:21)
+RS <- RS %>% select(1:7,"P2A",8:21)
+```
+
+```{r}
+RSA <- RS %>% filter(AH=="A")
+RSH <- RS %>% filter(AH=="H")
+```
+
+```{r}
+#| label: tbl-RS
+#| tbl-cap: Pierwsze 10 wierszy tabeli statystyk z Sezonu Regularnego
+head(RS,n=10) %>%
+  kbl(align="c",escape = F) %>%
+  kable_styling(bootstrap_options=c("striped", "hover","condensed","bordered"), full_width = T, position = "center") %>%
+  column_spec(3, image =spec_image(c("BOS.png","MIL.png","MIL.png","KCK.png","DEN.png","DET.png","NYK.png","IND.png","SAS.png","BOS.png"),70,70)) %>% 
+  column_spec(4, 
+              color=ifelse(RS$WL=="W","#01fd21","red"),bold=T) %>% 
+  column_spec(6,bold=TRUE) %>% 
+  scroll_box(height = "500px")
+```
+
+Tabela przedstawia statysyki rozegranych meczów przez Jordana w sezonach regularnych poczynając od jego pierwszego sezonu (Rookie season), czyli 1984, aż do roku 1992, w któym to trzeci raz z rzędu oboronili mistrzostwo ligi NBA (Three-peat).
+
+Poniżej znajduje się opis nagłówków:
+
+-   **Date** - Data rozegrania meczu w formacie rok, miesiąc i dzień (YYYY-MM-DD)
+-   **AH -** Informacja, gdzie rozgrywany był mecz - "w domu" czy "na wyjeździe"
+    -   **A -** Mecz wyjazdowy *(ang. Away)*
+    -   **H** - Mecz domowy *(ang. Home)*
+-   **Team** - Drużyna z którą grało Chicago Bulls danego dnia
+-   **WL** - Rezultat meczu
+    -   **W** - Wygrana (ang. *Win*)
+    -   **L** - Przegrana (ang. *Loss*)
+-   **MP** - Ilość minut spędzonych na boisku *(ang. Minutes played)*
+-   **PTS** - Ilość punktów zdobytych
+-   **FG** - Trafione rzuty podaczas meczu (ang. *Field goal*)
+-   **FGA** - Oddane rzuty podczas meczu (ang. *Field goal attempts*)
+-   **TP** - Trafione rzuty 3-puntkowe (ang. *Three pointer*)
+-   **TPA** - Oddane rzuty 3-punktowe (ang. *Three pointer attempts*)
+-   **FT** - Trafione rzuty osobiste (ang. *Free throw*)
+-   **P2A -** Oddane rzuty 2-punktowe (ang. *Two pointer attempts*)
+-   **FTA** - Oddane rzuty osobiste (ang. *Free throw attempts*)
+-   **ORB** - Zbiórki ofensywne *(ang. Offensive rebounds)*
+-   **DRB** - Zbiórki defensywne *(ang. Defensive rebounds)*
+-   **TRB** - Wszystkie zbiórki (ang.Total *Rebounds*)
+-   **AST** - Asysty (ang. *Assists)*
+-   **STL** - Przechwyty (ang. *Steals*)
+-   **BLK** - Bloki (ang. *Blocks*)
+-   **TO** - Straty piłki (ang. *Turnovers*)
+-   **PF** - Faule *(ang. Personal fauls)*
+
+Przedstawiona ramka danych posiada następującą strukturę:
+
+```{r}
+#| label: str-RS
+#| tbl-cap: Typy danych w ramce danych "RS"
+df_types <- sapply(RS, class)
+df_types_table <- data.frame(typ= df_types)
+colnames(df_types_table) <- (typ="Typ danych")
+
+kable(df_types_table) %>%
+  kable_styling()
+```
+
+Zbiór składa się z 667 obserwacji i posiada 21 kolumn.
+
+W zbiorze 3 razy występuje typ danych typu `character`, raz typ `date`, natomiast reszta wartości jest typu numerycznego. Dane nie posiadają wartości pustych lub `NA`.
+
+```{r, echo=FALSE, results='hide'}
+sum(is.na(RS))
+```
+
+## Podstawowe statystyki
+
+```{r}
+RS %>% 
+  select(6:21) %>% 
+  tbl_summary(type = list(where(is.numeric) ~ "continuous"),
+              statistic = list(where(is.numeric) ~ "{mean} ({min},{max},{sd})"))
+```
+
+Na podstawie powyższej tabeli nie byliśmy w stanie wywnioskować pierwszych spostrzeżeń analizy wzrokowej, które mogłyby pomóc w budowie modelu.
+
+## Wykresy
+
+```{r}
+#| label: tbl-PtsSummary
+#| tbl-cap: Podsumowanie zdobytych punktów
+RS %>% 
+  summarise("Minimum"=min(PTS),
+            "Średnia"=round(mean(PTS), digits=2),
+            "Mediana"=round(median(PTS), digits=2),
+            "Suma"=sum(PTS),
+            "Maximum"=max(PTS)) %>% 
+   kbl(align = "c") %>% 
+  kable_styling(bootstrap_options=c("striped", "hover","condensed","bordered"), full_width = F, position = "center")
+```
+
+Zmienna `PTS`- "zdobyte punkty" to kluczowy czynnik w procesie tworzenia modelu jest to zmienna objaśniana budowanego modelu. Zakres wartości tej zmiennej obejmuje od minimalnej wartości 8 do maksymalnej 69, co ukazuje różnorodność osiąganych wyników. Natomiast mediana, ustalająca środek rozkładu, wynosi 32, a bliska jej średnia arytmetyczna wynosi 32.3.
+
+```{r}
+mean_value <- mean(RS$PTS)
+median_value <- median(RS$PTS)
+RS %>% 
+  ggplot(aes(PTS))+
+  geom_histogram(fill="black",color="white",bins=30)+
+  geom_vline(xintercept = mean_value, linetype = "dashed", color = "red",size=0.7)+
+  geom_vline(xintercept = median_value, linetype = "dashed", color = "green",size=0.7)+
+  geom_text(aes(x = 36, y = 40, label = "Średnia"), color = "red", vjust = -0.5, size = 4) +
+  geom_text(aes(x = 28, y = 40, label = "Mediana"), color = "green", vjust = 0.5, size = 4)+
+  labs(title="Histogram zmiennej objaśnianej  - Zdobyte punkty",y="Liczebność",x="Punkty")+
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Skośność zmiennej punkty, mierząca asymetrię rozkładu, wynosi **0.346**. Wartość dodatnia skośności wskazuje na to, że ogon rozkładu zdobytych punktów w prawo jest dłuższy niż w lewo, co oznacza, że istnieje pewne prawdopodobieństwo uzyskania wysokich wyników punktowych. Asymetria prawostronna może być wynikiem nieregularnych przypadków, które zwiększają średnią - 10 meczy podczas których Jordan zdobył 54 lub więcej punktów.
+
+Kurtoza zmiennej punkty, mierząca "peakedness" rozkładu, wynosi **0.386**. Wartość kurtozy jest umiarkowanie dodatnia, co sugeruje, że rozkład ten ma lekko spłaszczony kształt w porównaniu do rozkładu normalnego.
+
+```{r,echo=FALSE,results='hide'}
+skewness(RS$PTS)
+kurtosis(RS$PTS)
+```
+
+```{r}
+RS %>% 
+  ggplot(aes(x=MP,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=F)+
+  xlim(c(13,48))+
+  labs(title = "Wykres zależności zdobytych punktów od rozegranych minut",
+       x = "Rozegrane Minuty",
+       y = "Zdobyte Punkty")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+Przedstawiony powyżej wykres wykazuje wyraźną dodatnią korelację między ilością rozegranych minut a zdobytymi punktami. Innymi słowy, im dłużej gra, tym więcej punktów zdobywa. Sugeruje to, że czas gry jest jednym z kluczowych czynników wpływającym na skuteczność punktową naszego zawodnika.
+
+```{r}
+RS %>% 
+  ggplot(aes(x=AST,y=PTS))+ 
+  geom_smooth(color = "red",se=T,lwd=1.6)+
+  xlim(c(1,9))+
+  labs(title = "Wykres zależności zdobytych punktów od rozdanych asyst",
+       x = "Rozdane asysty",
+       y = "Zdobyte Punkty")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Na wykresie zależności zdobytych punktów od rozdanych asyst obserwujemy charakterystyczny kształt linii trendu, który przypomina spłaszczoną małą literę "m" oraz występuje w zakresie wartości y od 31 do 33, odpowiadającym zdobytym punktom.
+
+Sugeruje to, że dla większości przypadków (rozważając asysty) związek między ilością asyst a zdobytymi punktami jest ograniczony lub zanika. Wartości y skoncentrowane między 31 a 33 wskazują na pewne utrzymywanie się zdobytych punktów, niezależnie od liczby rozdanych asyst. Może to sugerować, że dla tej konkretnej analizy, rozdawane asysty nie są kluczowym czynnikiem wpływającym na punktację.
+
+```{r}
+ggplot(RS, aes(x = AH, y = PTS, fill = AH)) +
+  geom_boxplot(color = "darkred", fill = c("#CE1142", "#000000"), alpha = 0.7, width = 0.5) +  # Kolorystyka związana z Chicago Bulls
+  labs(title = "Punkty zdobyte w meczach na wyjeździe i w domu",
+       x = "Miejsce",
+       y = "Zdobyte punkty") +
+  theme_minimal() +
+  theme(  # Ukrycie legendy
+        plot.title = element_text(size = 16, face = "bold"),  # Dostosowanie tytułu
+        axis.title.x = element_text(size = 14),  # Dostosowanie etykiety osi x
+        axis.title.y = element_text(size = 14),  # Dostosowanie etykiety osi y
+        axis.text.x = element_text(size = 12),  # Dostosowanie tekstu na osi x
+        axis.text.y = element_text(size = 12))  # Dostosowanie tekstu na osi y
+```
+
+Z analizy wykresu wynika, że kwantyle 0.5, 0.75 dla meczów na wyjeździe są niższe niż dla meczów domowych. Oznacza to, że w połowie przypadków oraz w górnej ćwiartce zawodnik zdobywa mniej punktów grając na wyjeździe. Jednakże, kwantyle 0.25 pozostają na tym samym poziomie, co sugeruje, że dolna ćwiartka punktacji nie różni się istotnie pomiędzy obiema lokalizacjami.
+
+```{r}
+#| label: tbl-PtsAHSummary
+#| tbl-cap: Kwantyle zdobytych punktów "w domu" a na "wyjeździe"
+Total_df<- data.frame(
+  Typ=c("Away - mecz wyjazdowy","Home - mecz domowy"),
+  "Q0.25"=c(round(quantile(RSA$PTS,0.25),4),round(quantile(RSH$PTS,0.25),4)),
+  Mediana=c(round(quantile(RSA$PTS,0.5),4),round(quantile(RSH$PTS,0.5),4)),
+  "Q0.75"=c(round(quantile(RSA$PTS,0.75),4),round(quantile(RSH$PTS,0.75),4))
+) 
+
+Total_df %>%  
+   kbl(align = "c") %>% 
+  kable_styling(bootstrap_options=c("striped", "hover","condensed","bordered"), full_width = F, position = "center")
+```
+
+Po przeprowadzonych obliczeniach stwierdzono, że wartości rzuconych punktów w kwantylach 0.5, 0.75 oraz medianie są średnio o jeden punkt wyższe w przypadku meczów wyjazdowych, co może wskazywać na lepszą skuteczność w zdobywaniu punktów podczas rozgrywek w obiekcie swojej drużyny.
+
+```{r}
+RS %>% 
+  ggplot(aes(x=FTA,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=F)+
+  labs(title = "Wykres zależności zdobytych punktów od oddanych rzutów osobistych",
+       x = "Oddane rzuty osobiste",
+       y = "Zdobyte Punkty")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+RS %>% 
+  ggplot(aes(x=P2A,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=F)+
+  labs(title = "Wykres zależności zdobytych punktów od oddanych rzutów z półdystansu",
+       x = "Oddane rzuty 2-punktowe",
+       y = "Zdobyte Punkty")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+RS %>% 
+  ggplot(aes(x=P2A,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=F)+
+  labs(title = "Wykres zależności zdobytych punktów od oddanych rzutów 3-punktowych",
+       x = "Oddane rzuty za trzy",
+       y = "Zdobyte Punkty")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Analiza trzech wykresów zależności pomiędzy zdobytymi punktami a różnymi kategoriami rzutów (rzuty osobiste, rzuty z półdystansu oraz rzuty za trzy punkty) ukazuje wyraźne, dodatnie korelacje pomiędzy ilością oddanych rzutów a zdobytymi punktami w każdej z tych kategorii. Wszystkie trzy wykresy wykazują silną zależność, co sugeruje, że skuteczność w oddawaniu rzutów istotnie wpływa na wynik punktowy drużyny.
+
+Wnioskiem jest, że wszystkie trzy analizowane kategorie rzutów prawdopodobnie mają mocny wpływ na końcowy wynik punktowy, co sugeruje, że będą to zmienne bardzo istotnie statystycznie podczas budowania modelu predykcyjnego.
+
+```{r}
+TypesofPTS <- RS %>% 
+  summarise("OnePTS"=sum(FTA),
+            "TwoPTS"=(sum(P2A)),
+            "ThreePTS"=(sum(P3A)))
+            
+TypesofPTS_df <- data.frame(
+  group=c("Oddane rzuty osobiste","Oddane rzuty z półdystansu","Oddane rzuty zza lini 3 punktów"),
+  value=c(TypesofPTS$OnePTS,TypesofPTS$TwoPTS,TypesofPTS$ThreePTS)
+)
+```
+
+```{r}
+ggplot(TypesofPTS_df, aes(x="", y=value, fill=group)) +
+  geom_bar(stat="identity", width=1.5, color="black") +
+  coord_polar("y", start=0) +
+  theme_void()+
+  labs(title="Suma punktów zdobytych z rzutów osobistych, półdystansu i zza linii 7.24m",fill="")+
+  scale_fill_manual(values=c("#CE1141","#000000","#FFFFFF"))+
+  geom_text(aes(label = value),
+            position = position_stack(vjust = 0.5),
+            color=ifelse(TypesofPTS_df$value==955,"black","white"))
+```
+
+W sytuacji, gdzie liczba rzutów z różnych pozycji jest znacząco zróżnicowana, może to wpłynąć na model, zwłaszcza jeśli dany rodzaj rzutów jest bardziej lub mniej wartościowy z punktu widzenia zdobywania punktów w meczu.
+
+W tym przypadku, rzuty z półdystansu mają znacznie większą liczbę niż inne kategorie, model może prawdopodobnie może skłaniać się ku bardziej dokładnemu uwzględnieniu wpływu rzutów z półdystansu. Jednakże, sam fakt, że jedna kategoria jest liczniejsza, nie oznacza automatycznie, że będzie miała większy wpływ na model.
+
+```{r}
+RS %>% 
+  ggplot(aes(x=ORB,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=T)+
+  labs(title = "Wykres zależności zdobytych punktów od zbiórek ofensywnych",
+       x = "Zbiórki ofensywne",
+       y = "Zdobyte Punkty")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Na przedstawionym wykresie zależności zdobytych punktów w meczu od liczby zbiórek ofensywnych obserwujemy interesujące trendy. W miarę wzrostu liczby zbiórek ofensywnych, obserwujemy delikatny wzrost punktów, co sugeruje pozytywną korelację między tymi dwoma zmiennymi.
+
+Gdy liczba zbiórek wynosi 1, następuje delikatny wzrost, co potwierdza wpływ nawet pojedynczej zbiórki na wynik punktowy. Następnie, przy 2 zbiórkach, zaobserwowano wybrzuszenie do około 33 punktów, a następnie delikatny spadek do 32.
+
+Jednak od 4 zbiórek zaczyna się wyraźny wzrost lini trendu, warto jednak zauważyć, że przedział ufności linii regresji dla tego obszaru znacznie się rozszerza. To sugeruje, że wraz ze wzrostem liczby zbiórek ofensywnych, zmienna ta staje się mniej pewnym predyktorem wyniku punktowego.
+
+```{r}
+RS %>% 
+  ggplot(aes(x=TOV,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=T)+
+  labs(title = "Wykres zależności zdobytych punktów od popełnionych strat",
+       x = "Popełnione straty",
+       y = "Zdobyte Punkty")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+W miarę wzrostu liczby popełnionych strat, obserwujemy falisty charakter wykresu, ogólnie utrzymuje się on w okolicach 32.5 (32-33) punkta. Jednakże, odnotowujemy pewien spadek zdobytych punktów po osiągnięciu 5 strat, a od 7 strat obserwujemy gwałtowny wzrost przedziału ufności linii trendu. To sugeruje, że liczba strat może mieć ograniczony wpływ na zdobyte punkty, a z powodu rosnącego przedziału ufności dla wyższych wartości, można przypuszczać, że zmienna liczby strat może być statystycznie nieistotna w modelu predykcyjnym.
+
+```{r}
+RS%>% 
+  ggplot(aes(x=STL,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=F)+
+  labs(title = "Wykres zależności zdobytych punktów od udanych przechwytów",
+       x = "Pzechwyty piłki",
+       y = "Zdobyte Punkty")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Linia regresji rośnie prawie pod kątem 45 stopni, co wskazuje na dodatnią i nieliniową zależność między zmiennymi. Interesującym aspektem jest spłaszczenie linii regresji przy 3 zbiórkach. To może sugerować, że początkowe zbiórki przyczyniają się do wzrostu zdobytych punktów, ale po osiągnięciu pewnego poziomu dodatkowe zbiórki mają mniejszy wpływ na wynik punktowy - dla wartości od 4 do 7 przechwytów liczba zdobytych punktów jest prawie stała. Wzrost liczby przechwytów powyżej tego zakresu jest związany z dalszym wzrostem punktów, tworząc krzywą funkcji wypukłej. To sugeruje, że liczba przechwytów może być jednym z istotnych czynników objaśniających w modelu, ale jej wpływ jest nieliniowy.
+
+## Tabela korelacji zmiennych
+
+```{r}
+RS %>% 
+  select(MP,STL,AST,ORB,PF,TOV,P3A,P2A,FTA,PTS) %>% 
+  chart.Correlation()
+```
+
+Ze wstępnej analizy macierzy korelacji możemy zauważyć, że 6 zmiennych jest istotnie statystycznie. Wyraźną dodatnią korelacją **(0.71)** charakteryzuje się zmienna `P2A` - "Oddane rzuty z półdystansu" oraz **(0.57)** `FTA` - "Próby rzutów osobistych", co wskazuje na silny związek między próbami rzutów za 2 punkty oraz liczbą prób rzutów osobistych a liczbą zdobytych. Umiarkowana dodatnia korelacja **(0.44)** "rozegranych minut" - `MP` wskazuje również, że im więcej czasu spędzonego na boisku, tym występuje tendencja do wyższej liczby zdobytych punktów.
+
+Pozostałe 3 zmienne - Przechwyty, zbiórki ofensywne, próby rzutów za 3 punkty - posiadają niską korelacje dodatnią **(0.15-0.20)** ze zmienną objaśnianą, co sugeruje że ich wpływ nie będzie tak mocno znaczący w budowanym modelu.
+
+Trzy pozostałe zmienne są uznane za nieistotne statystycznie, co oznacza, że ich wpływ na liczbę zdobytych punktów nie jest statystycznie istotny.
+
+## Tworzenie modelu
+
+Korzystając z regresji krokowej oraz regresji wstecznej udało nam się stworzyć jeden model, który zmienną `PTS` wyjaśniał za pomocą zmiennych `AH,MP,FTA,P2A,P3A,ORB`. Korzystając z własnych przemyśleń oraz wiedzy, że Michael Jordan był znany ze sporej liczby przechwytów w rozgrywanych meczach, stworzyliśmy również model ze zmienną `STL`. Po przeprowadzeniu analiz których nie załączamy w raporcie zdecydowaliśmy się nie dodawać do modelu zmiennej `STL`, ponieważ była nieistotna statystycznie, oraz o usunięciu zmiennej `ORB`, ponieważ jej interpretacja wprowadzała pewne zamieszanie. Poniżej znajduje się zestawienie z porównaniem tych 3 modeli za pomocą miar ocen jakości modelu oraz kryteriów.
+
+```{r, echo=FALSE,results='hide'}
+RS$AH <- as.factor(RS$AH)
+model_pełny <- lm(PTS~AH+STL+MP+BLK+ORB+TOV+PF+FTA+P2A+P3A,data=RS) 
+model_pusty <- lm(PTS~1,data=RS)
+```
+
+```{r,echo=FALSE, results='hide'}
+summary(model_pełny)
+```
+
+```{r, echo=FALSE,results='hide'}
+licz_modele <- function(x) {
+  R_squared <- summary(x)$adj.r.squared
+  h <- lm.influence(x)$hat
+  residuals <- residuals(x)
+  PRESS <-round(sum((residuals / (1 - h))^2),2)
+  MAE <- mean(abs(residuals))
+  MSE <- mean(residuals^2)
+  RMSE <- sqrt(mean(residuals^2))
+  AIC_val <- AIC(x)
+  BIC_val <- BIC(x)
+  wyniki <- data.frame(
+    Metryka = c("R-squared", "PRESS", "MAE", "MSE", "RMSE", "AIC", "BIC"),
+    Wartosc = c(round(R_squared,3),round(PRESS,3) ,round(MAE,3),round(MSE,3) , round(RMSE,3), round(AIC_val,3),round(BIC_val,3) )
+  )
+  # Użyj kable do wyświetlenia wyników w tabeli
+  wyniki %>%
+   print() 
+}
+```
+
+```{r, echo=FALSE, results='hide'}
+met_przod <- step(model_pusty,scope=formula(model_pełny),
+direction='forward',test='F',trace=15)
+```
+
+```{r, echo=FALSE,results='hide'}
+summary(met_przod)
+```
+
+```{r, echo=FALSE,results='hide'}
+met_tyl <- step(model_pełny,scope=formula(model_pełny),
+direction = 'backward',test='F',trace=15)
+```
+
+```{r, echo=FALSE,results='hide'}
+summary(met_tyl)
+```
+
+```{r, echo=FALSE}
+mdl <- lm(PTS~AH+MP+FTA+P2A+P3A,data=RS) 
+```
+
+```{r, echo=FALSE}
+mdl1 <- lm(PTS~AH+MP+FTA+P2A+P3A+ORB+STL,data=RS)
+```
+
+```{r, echo=FALSE}
+mdl2 <- lm(PTS~AH+MP+FTA+P2A+P3A+ORB,data=RS)
+```
+
+```{r, echo=FALSE, results='hide'}
+df1 <- licz_modele(mdl)
+df2 <- licz_modele(mdl1)
+df3 <- licz_modele(mdl2)
+```
+
+```{r, echo=FALSE,results='hide'}
+grob1 <- tableGrob(df1)
+grob2 <- tableGrob(df2)
+grob3 <- tableGrob(df3)
+labels <- c("Model z którego korzystamy", "Model ze zmienną STL", "Model ze zmienną ORB")
+```
+
+```{r}
+top_vp <- viewport(height = unit(0.6, "npc"), width = 1, just = "center")
+
+grid.arrange(
+  arrangeGrob(grob1, top = textGrob(labels[1], gp = gpar(fontsize = 12)), vp = top_vp),
+  arrangeGrob(grob2, top = textGrob(labels[2], gp = gpar(fontsize = 12)), vp = top_vp),
+  arrangeGrob(grob3, top = textGrob(labels[3], gp = gpar(fontsize = 12)), vp = top_vp),
+  ncol = 3
+)
+```
+
+```{r}
+summary(mdl)
+```
+
+Widzimy, że wszystkie estymatory parametrów strukturalnych są istotne statystycznie. Dodatkowo **współczynnik determinacji** wynosi **0.7172** co oznacza , że około **71%** zmienności w PTS jest wyjaśniane przez zmienne niezależne. Błąd standardowy w modelu wynosi 4.9. Oznacza to, że model może się mylić średnio o **4.9** zdobytych punktów w meczu.
+
+**PTS = 3.20 + 1.33\*AHH - 0.10\*MP + 0.88\*FTA + 1.01\*P2A + 1.38\*P3A**
+
+## Diagnostyka modelu
+
+### Normal Q-Q - wykres kwantylowy
+
+```{r}
+plot(mdl,which=2,lwd=2)
+```
+
+W rozważanym modelu obserwacje nie odbiegają od prostej co oznacza, że można przypuszczać, że rozkład reszt jest normalny.
+
+### Residuals vs Fitted - Wykres reszt względem wartości dopasowanych
+
+```{r}
+plot(mdl,which=1,lwd=3)
+```
+
+W rozważanym modelu na wykresie reszt względem wartości dopasowanych można zauważyć prostą, co oznacza, że liniowa zależność została wyjaśniona przez model i nie została pominięta w resztach.
+
+### Scale-Location - wykres reszt standaryzowanych względem wartości dopasowanych
+
+```{r}
+plot(mdl,which = 3,lwd=2)
+```
+
+Na powyższym wykresie widać, że czerwona krzywa jest bliska linii poziomej oraz że pierwiastki z standaryzowanych reszt są równomiernie rozmieszczone wokół czerwonej linii. Zatem założenie o jednorodności wariancji reszt może być spełnione. Zaleca się sprawdzenie tej obserwacji za pomocą odpowiedniego testu statystycznego w celu dodatkowego zweryfikowania hipotezy o homoskedastyczności modelu.
+
+### Liniowość
+
+```{r}
+resettest(mdl)
+```
+
+Otrzymana w **teście RESET wartość p, która wynosi 0,733** sugeruje brak dowodów na istnienie nieliniowości.
+
+### Liniowa niezależność
+
+```{r}
+vif_results <- vif(mdl)
+vif_results
+```
+
+**1-5:** Współliniowość umiarkowana -- brak poważnego problemu
+
+### Homoskedastyczność
+
+```{r}
+gqtest(mdl)
+```
+
+W przeprowadzonym **teście Goldfelda-Quandta** na badanym modelu **wartość p osiąga 0,9909,** co sugeruje, że założenie o stałej wariancji regresji liniowej jest spełnione w modelu .
+
+### Autokorelacja błędów
+
+```{r}
+dwtest(mdl)
+bgtest(mdl,2)
+```
+
+**Test Durbina-Watsona i test Breuscha-Godfreya** dla korelacji seryjnej rzędu do 2 mają **wartości p odpowiednio 0,5751 i 0,6.** Te wartości p są większe niż 0,05, co sugeruje, że nie ma wystarczających dowodów, aby stwierdzić, że w resztach modelu występuje autokorelacja.
+
+### Liniowość błędów
+
+```{r}
+shapiro.test(mdl$residuals)
+```
+
+Przeprowadzony **test Shapiro Wilka** nie odrzuca hipotezy o normalności reszt modelu (**p-value \> 0.05**).
+
+## Predykcje modelu
+
+31-szego Marca 1989 Micheal Jordan rozegrał mecz w domu przeciwko drużynie **Cleveland Cavaliers**. Zdobył 37 punktów oddając przy tym samym **7 rzutów osobistych**, **27 z półdystansu** oraz **2 rzuty 3-punktowe**, dokonał tego w czasie **43 minut**. Efektem końcowym pomimo świetnych statystyk MJ'a była przegrana drużyny chicago bulls.
+
+```{r}
+nowa_wart <- data.frame(AH=c("H"),MP=c(43),FTA=c(7),P2A=c(27),`P3A`=c(2))
+kable(nowa_wart,booktabs=T,format = 'pipe')
+```
+
+```{r}
+prz_uf <- predict(mdl, newdata=nowa_wart, interval="predict")
+kable(prz_uf,booktabs=T,format = 'pipe')
+```
+
+Drugi z meczy testujących zbudowany model predykcyjny to mecz rozegrany 12 listopada 1989 roku z drużyną New Jersy Nets (obecnie Brooklyn Nets). Rozgrywany był on **na wyjeździe** a rezultatem był negatywny - Chicago Bulls przegrało.
+
+Jordan wystąpił wtedy **43 minut**, podczas których zdobył **42 punkty**. Aby uzyskać ten wynik potrzebował oddać **12 rzutów osobistych**, **28 z półdystansu** oraz **3 rzuty 3-punktowe**.
+
+```{r}
+nowa_wart5 <- data.frame(AH=c("A"),MP=c(43),FTA=c(12),P2A=c(28),`P3A`=c(3))
+kable(nowa_wart5,booktabs=T,format = 'pipe')
+```
+
+```{r}
+prz_uf5 <- predict(mdl, newdata=nowa_wart5, interval="predict")
+kable(prz_uf5,booktabs=T,format = 'pipe')
+```
+
+12-stego Kwietnia 1991 Micheal Jordan rozegrał mecz na wyjeździe przeciwko drużynie Detroit Pistons. Zdobył 40 punktów oddając przy tym samym **15 rzutów osobistych**, **22 z półdystansu** oraz **2 rzuty 3-punktowe**, dokonał tego w czasie **43 minut**. Efektem końcowym pomimo świetnych statystyk MJ'a była przegrana drużyny chicago bulls.
+
+```{r}
+nowa_wart6 <- data.frame(AH=c("A"),MP=c(43),FTA=c(15),P2A=c(22),`P3A`=c(2))
+kable(nowa_wart6,booktabs=T,format = 'pipe')
+```
+
+```{r}
+prz_uf6 <- predict(mdl, newdata=nowa_wart6, interval="predict")
+kable(prz_uf6,booktabs=T,format = 'pipe')
+```
