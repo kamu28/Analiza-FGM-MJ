@@ -1,0 +1,585 @@
+---
+title: "Utilization of Michael Jordan's game statistics for estimating average point scoring"
+author: "Kamil Chmielak"
+date: today
+format:
+  html:
+   self-contained: true
+   message: false 
+   warning: false
+   echo: false
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(rvest)
+library(tidyverse)
+library(tidyr)
+library(readODS)
+library(knitr)
+library(kableExtra)
+library(formattable)
+library(gtsummary)
+library(ggplot2)
+library(cowplot)
+library(PerformanceAnalytics)
+library(lmtest)
+library(car)
+library(stats)
+library(performance)
+library(see)
+library(patchwork)
+library(gridExtra)
+library(grid)
+library(psych)
+options(scipen = 999)
+```
+
+## The project objective
+
+The main objective of the analysis is to examine the impact of other statistics on Michael Jordan's point scoring across 9 NBA regular seasons and to create a predictive model explaining the quantity of points scored per game.
+
+## Dataset
+
+To create the dataset and conduct the analysis, statistics from each of the 9 NBA seasons were utilized, which were then merged into a single main data frame. The statistics were sourced from [www.basketball-reference.com](http://www.basketball-reference.com/), a website that houses statistics, results, and histories of the NBA, ABA, WNBA leagues, as well as top European competitions.
+
+```{r}
+##Tabels
+RS84 <- read_ods("DF/Jordan1984.ods")
+RS85 <- read_ods("DF/Jordan1985.ods")
+RS86 <- read_ods("DF/Jordan1986.ods")
+RS87 <- read_ods("DF/Jordan1987.ods")
+RS88 <- read_ods("DF/Jordan1988.ods")
+RS89 <- read_ods("DF/Jordan1989.ods")
+RS90 <- read_ods("DF/Jordan1990.ods")
+RS91 <- read_ods("DF/Jordan1991.ods")
+RS92 <- read_ods("DF/Jordan1992.ods")
+```
+
+```{r}
+##Creating the main table with a division into away and home games, as well as transformations.
+RS <- rbind(RS84,RS85,RS86,RS87,RS88,RS89,RS90,RS91,RS92)
+RS$WL <- substr(RS$WL,1,1)
+RS$MP <- as.numeric(substr(RS$MP,start=1,stop=2))
+RS <- subset(RS,select = -GS)
+colnames(RS)[colnames(RS) == "X3PA"] <- "P3A"
+colnames(RS)[colnames(RS) == "X3P"] <- "P3"
+
+RS <- RS %>% mutate("P2A"=FGA-P3A)
+RS <- RS %>% select(1:5,"PTS",6:21)
+RS <- RS %>% select(1:7,"P2A",8:21)
+```
+
+```{r}
+RSA <- RS %>% filter(AH=="A")
+RSH <- RS %>% filter(AH=="H")
+```
+
+```{r}
+#| label: tbl-RS
+#| tbl-cap: The first 10 rows of the statistics table from the Regular Season
+head(RS,n=10) %>%
+  kbl(align="c",escape = F) %>%
+  kable_styling(bootstrap_options=c("striped", "hover","condensed","bordered"), full_width = T, position = "center") %>%
+  column_spec(3, image =spec_image(c("BOS.png","MIL.png","MIL.png","KCK.png","DEN.png","DET.png","NYK.png","IND.png","SAS.png","BOS.png"),70,70)) %>% 
+  column_spec(4, 
+              color=ifelse(RS$WL=="W","#01fd21","red"),bold=T) %>% 
+  column_spec(6,bold=TRUE) %>% 
+  scroll_box(height = "500px")
+```
+
+The table presents statistics of games played by Jordan in regular seasons starting from his rookie season in 1984 until the year 1992, during which the team won the NBA championship for the third consecutive time (Three-peat).
+
+Description of the headers:
+
+-   **Date** - The date of the game in the format year, month, and day (YYYY-MM-DD)
+-   **AH -** Information about where the game was played - "home" or "away"
+    -   **A -** *Away*
+    -   **H** - *Home*
+-   **Team** - The team against which the Chicago Bulls played on the current day
+-   **WL** - Game result
+    -   **W** - *Win*
+    -   **L** - *Loss*
+-   **MP** - *Minutes played*
+-   **PTS** - The number of scored points
+-   **FG** - *Field goal*
+-   **FGA** - *Field goal attempts*
+-   **TP** - *Three pointer*
+-   **TPA** - *Three pointer attempts*
+-   **FT** - *Free throw*
+-   **P2A -** *Two pointer attempts*
+-   **FTA** - *Free throw attempts*
+-   **ORB** - *Offensive rebounds*
+-   **DRB** - *Defensive rebounds*
+-   **TRB** - Total *rebounds*
+-   **AST** - *Assists*
+-   **STL** - *Steals*
+-   **BLK** - *Blocks*
+-   **TO** - *Turnovers*
+-   **PF** - *Personal fouls*
+
+The presented data frame has the following structure:
+
+```{r}
+#| label: str-RS
+#| tbl-cap: Data type in data frame "RS"
+df_types <- sapply(RS, class)
+df_types_table <- data.frame(typ= df_types)
+colnames(df_types_table) <- (typ="Data type")
+
+kable(df_types_table) %>%
+  kable_styling()
+```
+
+The dataset consists of 667 observations and contains 21 columns.
+
+In the dataset, there are 3 columns with `character` data type, 1 column with `date` data type, and the remaining values are of `numerical` type. The data does not contain any missing or NA values.
+
+```{r, echo=FALSE, results='hide'}
+sum(is.na(RS))
+```
+
+## Basic statistics
+
+```{r}
+RS %>% 
+  select(6:21) %>% 
+  tbl_summary(type = list(where(is.numeric) ~ "continuous"),
+              statistic = list(where(is.numeric) ~ "{mean} ({min},{max},{sd})"))
+```
+
+Based on the above table, we were unable to deduce any initial insights from visual analysis that could help in model construction.
+
+## Charts
+
+```{r}
+#| label: tbl-PtsSummary
+#| tbl-cap: Summary of scored points
+RS %>% 
+  summarise("Minimum"=min(PTS),
+            "Mean"=round(mean(PTS), digits=2),
+            "Median"=round(median(PTS), digits=2),
+            "Sum"=sum(PTS),
+            "Maximum"=max(PTS)) %>% 
+   kbl(align = "c") %>% 
+  kable_styling(bootstrap_options=c("striped", "hover","condensed","bordered"), full_width = F, position = "center")
+```
+
+The variable PTS (points scored) is a key factor in the model-building process and serves as the dependent variable of the constructed model. The range of values for this variable spans from a minimum of 8 to a maximum of 69, indicating the diversity of achieved results. The median, which establishes the central point of the distribution, is 32, with a close mean of 32.3.
+
+```{r}
+mean_value <- mean(RS$PTS)
+median_value <- median(RS$PTS)
+RS %>% 
+  ggplot(aes(PTS))+
+  geom_histogram(fill="black",color="white",bins=30)+
+  geom_vline(xintercept = mean_value, linetype = "dashed", color = "red",size=0.7)+
+  geom_vline(xintercept = median_value, linetype = "dashed", color = "green",size=0.7)+
+  geom_text(aes(x = 36, y = 40, label = "Mean"), color = "red", vjust = -0.5, size = 4) +
+  geom_text(aes(x = 28, y = 40, label = "Median"), color = "green", vjust = 0.5, size = 4)+
+  labs(title="Histogram of the dependent variable - Points scored",y="Count",x="Points")+
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+The skewness of the points variable, measuring the asymmetry of the distribution, is **0.346**. A positive skewness value indicates that the tail of the distribution of points scored extends more to the right than to the left, suggesting a probability of achieving high point scores. Right-skewness may result from irregular cases that inflate the mean - for example, 10 games in which Jordan scored 54 or more points.
+
+The kurtosis of the points variable, measuring the peakedness of the distribution, is **0.386**. The kurtosis value is moderately positive, suggesting that the distribution is slightly flatter compared to a normal distribution.
+
+```{r,echo=FALSE,results='hide'}
+skewness(RS$PTS)
+kurtosis(RS$PTS)
+```
+
+```{r}
+RS %>% 
+  ggplot(aes(x=MP,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=F)+
+  xlim(c(13,48))+
+  labs(title = "Graph of the relationship of points scored to minutes played",
+       x = "Minutes played",
+       y = "Scored points")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+The above-presented plot demonstrates a clear positive correlation between the number of minutes played and points scored. In other words, the longer the player participates in the game, the more points they tend to score. This suggests that playing time is one of the key factors influencing the scoring efficiency of our player.
+
+```{r}
+RS %>% 
+  ggplot(aes(x=AST,y=PTS))+ 
+  geom_smooth(color = "red",se=T,lwd=1.6)+
+  xlim(c(1,9))+
+  labs(title = "Graph of the relationship of points scored to assists made",
+       x = "Assists made",
+       y = "Points scored")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+In the plot depicting the relationship between points scored and assists given, we observe a characteristic shape of the trend line, resembling a flattened lowercase 'm', occurring in the range of y values from 31 to 33, corresponding to points scored.
+
+This suggests that for the majority of cases (considering assists), the relationship between the number of assists and points scored is limited or diminishes. The concentration of y values between 31 and 33 indicates some maintenance of points scored, regardless of the number of assists. This may suggest that, for this specific analysis, the number of assists is not a key factor influencing scoring.
+
+```{r}
+ggplot(RS, aes(x = AH, y = PTS, fill = AH)) +
+  geom_boxplot(color = "darkred", fill = c("#CE1142", "#000000"), alpha = 0.7, width = 0.5) +  # Colors cmombined with Chicago Bulls theme
+  labs(title = "Points scored in away and home games",
+       x = "The location of the game",
+       y = "Points scored") +
+  theme_minimal() +
+  theme(  # Hiding legend
+        plot.title = element_text(size = 16, face = "bold"),  
+        axis.title.x = element_text(size = 14), 
+        axis.title.y = element_text(size = 14), 
+        axis.text.x = element_text(size = 12),  
+        axis.text.y = element_text(size = 12))  
+```
+
+From the analysis of the plot, it can be observed that the 0.5 and 0.75 quantiles for away games are lower than for home games. This means that in half of the cases and in the upper quartile, the player scores fewer points when playing away. However, the 0.25 quantiles remain at the same level, suggesting that the lower quartile of scoring does not significantly differ between the two locations.
+
+```{r}
+#| label: tbl-PtsAHSummary
+#| tbl-cap: Quantiles of points scored 'at home' versus 'away'
+Total_df<- data.frame(
+  Type=c("Away","Home"),
+  "Q0.25"=c(round(quantile(RSA$PTS,0.25),4),round(quantile(RSH$PTS,0.25),4)),
+  Median=c(round(quantile(RSA$PTS,0.5),4),round(quantile(RSH$PTS,0.5),4)),
+  "Q0.75"=c(round(quantile(RSA$PTS,0.75),4),round(quantile(RSH$PTS,0.75),4))
+) 
+
+Total_df %>%  
+   kbl(align = "c") %>% 
+  kable_styling(bootstrap_options=c("striped", "hover","condensed","bordered"), full_width = F, position = "center")
+```
+
+After conducting the calculations, it was found that the values of points scored in the 0.5, 0.75 quantiles, and median are on average one point higher in the case of away games, indicating potentially better scoring efficiency during away matches.
+
+```{r}
+RS %>% 
+  ggplot(aes(x=FTA,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=F)+
+  labs(title = "Graph illustrating the relationship between points scored and attempted free throws",
+       x = "Free throw attempts",
+       y = "Points scored")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+RS %>% 
+  ggplot(aes(x=P2A,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=F)+
+  labs(title = "Graph illustrating the relationship between points scored and attempted two-point shots",
+       x = "Two pointer attempts",
+       y = "Points scored")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+RS %>% 
+  ggplot(aes(x=P2A,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=F)+
+  labs(title = "Graph illustrating the relationship between points scored and attempted three-point shots.",
+       x = "Three pointer attempts",
+       y = "Points scored")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+The analysis of three plots depicting the relationship between points scored and different shot categories (free throws, mid-range shots, and three-point shots) reveals clear, positive correlations between the number of attempted shots and points scored in each of these categories. All three plots demonstrate a strong relationship, suggesting that shooting efficiency significantly impacts team scoring.
+
+The conclusion drawn is that all three analyzed shot categories likely have a strong impact on the final point outcome, indicating that they will be highly statistically significant variables during the construction of a predictive model.
+
+```{r}
+TypesofPTS <- RS %>% 
+  summarise("OnePTS"=sum(FTA),
+            "TwoPTS"=(sum(P2A)),
+            "ThreePTS"=(sum(P3A)))
+            
+TypesofPTS_df <- data.frame(
+  group=c("Free throw attempts","Two pointer attempts","Three pointer attempts"),
+  value=c(TypesofPTS$OnePTS,TypesofPTS$TwoPTS,TypesofPTS$ThreePTS)
+)
+```
+
+```{r}
+ggplot(TypesofPTS_df, aes(x="", y=value, fill=group)) +
+  geom_bar(stat="identity", width=1.5, color="black") +
+  coord_polar("y", start=0) +
+  theme_void()+
+  labs(title="The total points scored from free throws, mid-range shots, and beyond the 7.24-meter line",fill="")+
+  scale_fill_manual(values=c("#CE1141","#FFFFFF","#000000"))+
+  geom_text(aes(label = value),
+            position = position_stack(vjust = 0.5),
+            color=ifelse(TypesofPTS_df$value==955,"black","white"))+
+  theme(plot.title = element_text(hjust = 0.5, margin = margin(b = -0.2, t = 0.2)))
+```
+
+In a situation where the number of shots from different positions is significantly diverse, this can impact the model, especially if a particular type of shot is more or less valuable in terms of scoring points in a game.
+
+In this case, mid-range shots have a significantly higher count than other categories, and the model may tend to more accurately consider the influence of mid-range shots. However, the mere fact that one category is more numerous does not automatically mean that it will have a greater impact on the model.
+
+```{r}
+RS %>% 
+  ggplot(aes(x=ORB,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=T)+
+  labs(title = "Graph illustrating the relationship between points scored and offensive rebounds",
+       x = "Offensive rebounds",
+       y = "Points scored")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+On the presented plot depicting the relationship between points scored in a game and the number of offensive rebounds, interesting trends can be observed. As the number of offensive rebounds increases, we observe a slight increase in points, suggesting a positive correlation between these two variables.
+
+When the number of rebounds is 1, a slight increase is observed, confirming the impact of even a single offensive rebound on the point outcome. Then, with 2 rebounds, a bump to around 33 points is observed, followed by a slight decrease to 32.
+
+However, from 4 rebounds onwards, a clear increase in the trend line can be seen, although it is worth noting that the confidence interval of the regression line for this area significantly widens. This suggests that as the number of offensive rebounds increases, this variable becomes a less certain predictor of the point outcome.
+
+```{r}
+RS %>% 
+  ggplot(aes(x=TOV,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=T)+
+  labs(title = "Graph illustrating the relationship between points scored and turnovers",
+       x = "Turnovers",
+       y = "Points scored")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+As the number of turnovers increases, we observe a fluctuating character of the plot, generally hovering around 32.5 (32-33) points. However, we notice a slight decrease in points scored after reaching 5 turnovers, and from 7 turnovers onwards, we observe a sharp increase in the confidence interval of the trend line. This suggests that the number of turnovers may have a limited impact on points scored, and due to the widening confidence interval for higher values, it can be inferred that the variable of turnovers may be statistically insignificant in the predictive model.
+
+```{r}
+RS%>% 
+  ggplot(aes(x=STL,y=PTS))+ 
+  geom_smooth(color = "red",lwd=1.6,se=F)+
+  labs(title = "Graph illustrating the relationship between points scored and steals",
+       x = "Steals",
+       y = "Points scored")+
+    theme_light()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+The regression line rises almost at a 45-degree angle, indicating a positive and nonlinear relationship between the variables. An interesting aspect is the flattening of the regression line at 3 steals. This may suggest that initial steals contribute to an increase in points scored, but after reaching a certain level, additional steals have less impact on the point outcome - for values from 4 to 7 steals, the number of points scored is almost constant. An increase in the number of steals beyond this range is associated with further increases in points, forming a convex curve. This suggests that the number of steals may be a significant explanatory factor in the model, but its impact is nonlinear.
+
+## The correlation table of variables
+
+```{r}
+RS %>% 
+  select(MP,STL,AST,ORB,PF,TOV,P3A,P2A,FTA,PTS) %>% 
+  chart.Correlation()
+```
+
+From the preliminary analysis of the correlation matrix, we can observe that 6 variables are statistically significant. A clear positive correlation **(0.71)** characterizes the variable `P2A` - "Mid-range shots attempted", and **(0.57)** `FTA` - "Free throw attempts", indicating a strong relationship between attempts of 2-point shots and the number of free throw attempts with the points scored. A moderate positive correlation **(0.44)** "minutes played" - `MP` also suggests that the more time spent on the court, the tendency for a higher number of points scored.
+
+The remaining 3 variables - Steals, Offensive rebounds, Three-point attempts - have low positive correlations **(0.15-0.20)** with the dependent variable, indicating that their influence will not be as significant in the constructed model.
+
+Three other variables are considered statistically insignificant, meaning their impact on the number of points scored is not statistically significant.
+
+## Model construction
+
+Using stepwise regression and backward regression, we managed to create one model that explained the variable `PTS` using the variables `AH, MP, FTA, P2A, P3A, ORB`. Utilizing our own insights and knowledge that Michael Jordan was known for a significant number of steals in played matches, we also created a model with the variable `STL`. After conducting analyses, which are not included in the report, we decided not to add the variable `STL` to the model because it was statistically insignificant, and to remove the variable `ORB` because its interpretation caused some confusion. Below is a comparison of these 3 models using measures of model quality and criteria.
+
+```{r, echo=FALSE,results='hide'}
+RS$AH <- as.factor(RS$AH)
+model_pełny <- lm(PTS~AH+STL+MP+BLK+ORB+TOV+PF+FTA+P2A+P3A,data=RS) 
+model_pusty <- lm(PTS~1,data=RS)
+```
+
+```{r,echo=FALSE, results='hide'}
+summary(model_pełny)
+```
+
+```{r, echo=FALSE,results='hide'}
+licz_modele <- function(x) {
+  R_squared <- summary(x)$adj.r.squared
+  h <- lm.influence(x)$hat
+  residuals <- residuals(x)
+  PRESS <-round(sum((residuals / (1 - h))^2),2)
+  MAE <- mean(abs(residuals))
+  MSE <- mean(residuals^2)
+  RMSE <- sqrt(mean(residuals^2))
+  AIC_val <- AIC(x)
+  BIC_val <- BIC(x)
+  wyniki <- data.frame(
+    Metric = c("R-squared", "PRESS", "MAE", "MSE", "RMSE", "AIC", "BIC"),
+    Value = c(round(R_squared,3),round(PRESS,3) ,round(MAE,3),round(MSE,3) , round(RMSE,3), round(AIC_val,3),round(BIC_val,3) )
+  )
+  # Use kable to show results in table
+  wyniki %>%
+   print() 
+}
+```
+
+```{r, echo=FALSE, results='hide'}
+met_przod <- step(model_pusty,scope=formula(model_pełny),
+direction='forward',test='F',trace=15)
+```
+
+```{r, echo=FALSE,results='hide'}
+summary(met_przod)
+```
+
+```{r, echo=FALSE,results='hide'}
+met_tyl <- step(model_pełny,scope=formula(model_pełny),
+direction = 'backward',test='F',trace=15)
+```
+
+```{r, echo=FALSE,results='hide'}
+summary(met_tyl)
+```
+
+```{r, echo=FALSE}
+mdl <- lm(PTS~AH+MP+FTA+P2A+P3A,data=RS) 
+```
+
+```{r, echo=FALSE}
+mdl1 <- lm(PTS~AH+MP+FTA+P2A+P3A+ORB+STL,data=RS)
+```
+
+```{r, echo=FALSE}
+mdl2 <- lm(PTS~AH+MP+FTA+P2A+P3A+ORB,data=RS)
+```
+
+```{r, echo=FALSE, results='hide'}
+df1 <- licz_modele(mdl)
+df2 <- licz_modele(mdl1)
+df3 <- licz_modele(mdl2)
+```
+
+```{r, echo=FALSE,results='hide'}
+grob1 <- tableGrob(df1)
+grob2 <- tableGrob(df2)
+grob3 <- tableGrob(df3)
+labels <- c("The model I am using", "Model with variable STL", "Model with variable ORB")
+```
+
+```{r}
+top_vp <- viewport(height = unit(0.6, "npc"), width = 1, just = "center")
+
+grid.arrange(
+  arrangeGrob(grob1, top = textGrob(labels[1], gp = gpar(fontsize = 12)), vp = top_vp),
+  arrangeGrob(grob2, top = textGrob(labels[2], gp = gpar(fontsize = 12)), vp = top_vp),
+  arrangeGrob(grob3, top = textGrob(labels[3], gp = gpar(fontsize = 12)), vp = top_vp),
+  ncol = 3
+)
+```
+
+```{r}
+summary(mdl)
+```
+
+We can see that all estimators of structural parameters are statistically significant. Additionally, **the coefficient of determination** is **0.7172**, which means that approximately **71%** of the variability in PTS is explained by the independent variables. **The standard error in the model is 4.9**. This means that, on average, the model can be off by 4.9 points scored per game.
+
+**PTS = 3.20 + 1.33\*AHH - 0.10\*MP + 0.88\*FTA + 1.01\*P2A + 1.38\*P3A**
+
+## Model diagnostics
+
+### Normal Q-Q plot
+
+```{r}
+plot(mdl,which=2,lwd=2)
+```
+
+In the considered model, observations do not deviate from the straight line, indicating that we can assume the residuals are normally distributed.
+
+### Residuals vs Fitted plot
+
+```{r}
+plot(mdl,which=1,lwd=3)
+```
+
+In the considered model, on the Residuals vs Fitted plot, we can observe a straight line, indicating that the linear relationship has been explained by the model and has not been omitted in the residuals.
+
+### Scale-Location plot
+
+```{r}
+plot(mdl,which = 3,lwd=2)
+```
+
+On the above plot, it can be seen that the red curve is close to the horizontal line, and the square roots of standardized residuals are evenly distributed around the red line. Therefore, the assumption of homoscedasticity of residuals may be satisfied. It is recommended to verify this observation using an appropriate statistical test to further confirm the hypothesis of homoscedasticity of the model.
+
+```{r}
+resettest(mdl)
+```
+
+**The obtained p-value in the RESET test, which is 0.733**, suggests no evidence of nonlinearity.
+
+### Linear independence
+
+```{r}
+vif_results <- vif(mdl)
+vif_results
+```
+
+**1-5:** Moderate collinearity - no significant issues
+
+### Homoscedasticity
+
+```{r}
+gqtest(mdl)
+```
+
+In the conducted **Goldfeld-Quandt test** on the model under consideration, **the p-value reaches 0.9909**, suggesting that the assumption of constant variance of linear regression is met in the model.
+
+### Autocorrelation of errors
+
+```{r}
+dwtest(mdl)
+bgtest(mdl,2)
+```
+
+**The Durbin-Watson test and the Breusch-Godfrey test** for serial correlation up to order 2 **have p-values of 0.5751 and 0.6 respectively**. These p-values are greater than 0.05, suggesting that there is not enough evidence to conclude that there is autocorrelation in the model residuals.
+
+### Linearity of errors
+
+```{r}
+shapiro.test(mdl$residuals)
+```
+
+**The Shapiro-Wilk test** conducted does not reject the hypothesis of normality of the model residuals (**p-value \> 0.05**).
+
+## Model predictions
+
+On March 31, 1989, Michael Jordan played a home game against the **Cleveland Cavaliers**. He scored 37 points, making **7 free throw attempts, 27 mid-range shots**, and **2 three-pointers**, all in **43 minutes of play**. Despite MJ's excellent statistics, the Chicago Bulls ended up losing the game.
+
+```{r}
+nowa_wart <- data.frame(AH=c("H"),MP=c(43),FTA=c(7),P2A=c(27),`P3A`=c(2))
+kable(nowa_wart,booktabs=T,format = 'pipe')
+```
+
+```{r}
+prz_uf <- predict(mdl, newdata=nowa_wart, interval="predict")
+kable(prz_uf,booktabs=T,format = 'pipe')
+```
+
+In the second of the testing matches, the built predictive model, on November 12, 1989, Michael Jordan played against the New Jersey Nets (now Brooklyn Nets) in an **away game**, resulting in a negative outcome as the Chicago Bulls lost.
+
+Jordan played for **43 minutes** during which he scored **42 points**. To achieve this result, he made **12 free throw attempts, 28 mid-range shots,** and **3 three-pointers**.
+
+```{r}
+nowa_wart5 <- data.frame(AH=c("A"),MP=c(43),FTA=c(12),P2A=c(28),`P3A`=c(3))
+kable(nowa_wart5,booktabs=T,format = 'pipe')
+```
+
+```{r}
+prz_uf5 <- predict(mdl, newdata=nowa_wart5, interval="predict")
+kable(prz_uf5,booktabs=T,format = 'pipe')
+```
+
+On April 12, 1991, Michael Jordan played an away game against the Detroit Pistons. He scored 40 points, making **15 free throw attempts, 22 mid-range shots,** and **2 three-pointers,** all in **43 minutes of play**. Despite MJ's excellent statistics, the Chicago Bulls ended up losing the game.
+
+```{r}
+nowa_wart6 <- data.frame(AH=c("A"),MP=c(43),FTA=c(15),P2A=c(22),`P3A`=c(2))
+kable(nowa_wart6,booktabs=T,format = 'pipe')
+```
+
+```{r}
+prz_uf6 <- predict(mdl, newdata=nowa_wart6, interval="predict")
+kable(prz_uf6,booktabs=T,format = 'pipe')
+```
